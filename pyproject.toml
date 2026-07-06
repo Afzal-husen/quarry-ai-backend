@@ -1,0 +1,37 @@
+[project]
+name = "backend"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "python-dotenv",
+    "langchain",
+    "langchain-community",
+    "langchain-groq",
+    "langchain-huggingface",
+    "sentence-transformers",
+    "docx2txt",
+    "pypdf",
+    "python-multipart",
+    "pytest",
+    "httpx",
+    "langchain-chroma",
+    "rank_bm25",
+    "bcrypt>=5.0.0",
+    "pyjwt>=2.13.0",
+    "flashrank",
+    "slowapi",
+]
+
+[tool.pytest.ini_options]
+markers = [
+    "enable_rate_limiting: enable slowapi rate limiting for this test case",
+]
+
+[tool.vercel]
+# Vercel entrypoint: points to the FastAPI app object in main.py
+# Used when deploying the backend to a platform that reads pyproject.toml
+entrypoint = "main:app"
