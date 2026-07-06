@@ -157,7 +157,7 @@ async def list_documents(
             status_val = "partial"
 
         summary = payload.get("summary", "")
-        summary_status = payload.get("summary_status", "pending")
+        summary_status = payload.get("summary_status", "failed")
 
         results.append(DocumentItem(
             document_id=document_id,
@@ -714,7 +714,7 @@ async def get_document_summary(
         )
 
     summary = payload.get("summary", "")
-    summary_status = payload.get("summary_status", "pending")
+    summary_status = payload.get("summary_status", "failed")
 
     return DocumentSummaryResponse(
         document_id=document_id,
