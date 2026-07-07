@@ -1,0 +1,62 @@
+services:
+  - type: web
+    name: document-rag-backend
+    runtime: docker
+    # Render builds from the Dockerfile in the repo root (which is backend/)
+    dockerfilePath: ./Dockerfile
+    plan: starter            # upgrade to standard/pro for persistent disk support
+    healthCheckPath: /health
+
+    disk:
+      name: rag-data
+      mountPath: /data        # must match DATA_DIR env var below
+      sizeGB: 5               # increase as your document corpus grows
+
+    envVars:
+      # -- Data persistence
+      - key: DATA_DIR
+        value: /data
+
+      # -- CORS: add your Vercel frontend URL (no trailing slash)
+      - key: CORS_ORIGINS
+        value: https://your-app.vercel.app
+
+      # -- Groq LLM
+      - key: GROQ_API_KEY
+        sync: false           # set securely in Render dashboard
+      - key: GROQ_MODEL
+        value: openai/gpt-oss-20b
+
+      # -- JWT Authentication
+      - key: JWT_SECRET_KEY
+        sync: false           # python -c "import secrets; print(secrets.token_hex(32))"
+      - key: JWT_ALGORITHM
+        value: HS256
+      - key: JWT_ACCESS_TOKEN_EXPIRE_MINUTES
+        value: "30"
+
+      # -- Embeddings
+      - key: EMBEDDING_MODEL
+        value: sentence-transformers/all-MiniLM-L6-v2
+
+      # -- Chunking
+      - key: CHUNK_SIZE
+        value: "500"
+      - key: CHUNK_OVERLAP
+        value: "50"
+
+      # -- Hybrid search weights (RRF)
+      - key: HYBRID_LEXICAL_WEIGHT
+        value: "0.5"
+      - key: HYBRID_SEMANTIC_WEIGHT
+        value: "0.5"
+
+      # -- Reranking
+      - key: RERANK_MODEL
+        value: ms-marco-MiniLM-L-12-v2
+
+      # -- Rate limiting
+      - key: RATE_LIMIT_UPLOAD
+        value: 5/minute
+      - key: RATE_LIMIT_QUERY
+        value: 30/minute

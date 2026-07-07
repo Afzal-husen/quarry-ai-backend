@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 FROM python:3.14-slim
 
 # Set environment variables
@@ -17,10 +18,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN pip install --no-cache-dir uv
 
 # Copy package definition files
-COPY pyproject.toml uv.lock /app/
+COPY pyproject.toml ./
 
 # Install dependencies using uv into the system python environment
-RUN uv pip install --system --no-cache -r pyproject.toml
+# --mount=type=cache persists uv's wheel cache on the Docker host between builds
+# so unchanged packages are never re-downloaded.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system -r pyproject.toml
 
 # Copy the rest of the application source code
 COPY . /app
@@ -36,4 +40,4 @@ USER appuser
 
 EXPOSE 8000
 
-CMD ["uv", "run", "main.py"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
