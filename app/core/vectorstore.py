@@ -5,7 +5,7 @@ import shutil
 import threading
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from app.core.paths import get_data_dir
 
@@ -71,7 +71,17 @@ class ChromaConnectionCache:
 
     _cache: OrderedDict = OrderedDict()
     _lock = threading.Lock()
-    _max_size: int = 100
+    _max_size: Optional[int] = None
+
+    @classmethod
+    def get_max_size(cls) -> int:
+        """Resolves cache limit size from environment variable, defaulting to 10."""
+        if cls._max_size is not None:
+            return cls._max_size
+        try:
+            return int(os.getenv("CHROMA_CACHE_SIZE", "10"))
+        except ValueError:
+            return 10
 
     @classmethod
     def get(cls, user_id: str, document_id: str, db_path: Path, embeddings: Any) -> Chroma:
@@ -86,14 +96,21 @@ class ChromaConnectionCache:
                 cls._cache.move_to_end(key)
                 return cls._cache[key]
 
-            # Instantiate new Chroma client
-            vectorstore = Chroma(
-                persist_directory=str(db_path),
-                embedding_function=embeddings
-            )
+        # Instantiate new Chroma client outside of cache lock to prevent serialization blocking
+        vectorstore = Chroma(
+            persist_directory=str(db_path),
+            embedding_function=embeddings
+        )
+
+        with cls._lock:
+            # Check if another thread populated this key while we were creating it
+            if key in cls._cache:
+                cls._close_client(vectorstore)
+                cls._cache.move_to_end(key)
+                return cls._cache[key]
 
             # Check capacity and evict oldest if necessary
-            if len(cls._cache) >= cls._max_size:
+            if len(cls._cache) >= cls.get_max_size():
                 cls._evict_lru_under_lock()
 
             cls._cache[key] = vectorstore
@@ -141,6 +158,9 @@ class ChromaConnectionCache:
 
 class VectorStoreManager:
     """Orchestrates indexing and retrieval of document chunks using isolated Chroma vector stores."""
+
+    _bm25_cache: Dict[Tuple[str, str], BM25Retriever] = {}
+    _bm25_lock = threading.Lock()
 
     def __init__(self):
         """Initializes the VectorStoreManager resolving backend data directories."""
@@ -219,7 +239,7 @@ class VectorStoreManager:
         return db_path
 
     def delete_document(self, user_id: str, document_id: str) -> None:
-        """Removes the isolated Chroma DB index directory from disk for a given user and document.
+        """Removes the isolated Chroma DB index directory from disk and evicts caches for a user and document.
 
         Args:
             user_id: The unique UUID of the authenticated user.
@@ -228,6 +248,11 @@ class VectorStoreManager:
         Raises:
             VectorStoreError: If directory removal fails.
         """
+        # Evict from BM25 memory cache
+        key = (user_id, document_id)
+        with self._bm25_lock:
+            self._bm25_cache.pop(key, None)
+
         db_path = self.vectorstore_dir / user_id / document_id
         if db_path.exists():
             try:
@@ -335,53 +360,66 @@ class VectorStoreManager:
         Raises:
             VectorStoreError: If the chunks or vector index does not exist.
         """
-        # 1. Resolve paths
-        chunks_file_path = self.chunks_dir / user_id / f"{document_id}.json"
-        if not chunks_file_path.exists():
-            raise VectorStoreError(
-                f"Ingested chunks metadata file not found at {chunks_file_path}. Please upload the document first."
-            )
+        key = (user_id, document_id)
+        with self._bm25_lock:
+            bm25_retriever = self._bm25_cache.get(key)
 
-        # 2. Load serialized JSON chunks
-        try:
-            with open(chunks_file_path, "r", encoding="utf-8") as f:
-                payload = json.load(f)
-        except Exception as e:
-            raise VectorStoreError(
-                f"Failed to read chunks metadata file: {str(e)}") from e
-
-        chunks_list = payload.get("chunks", [])
-        if not chunks_list:
-            raise VectorStoreError(
-                "Metadata payload contains empty chunks list.")
-
-        # 3. Convert raw chunk dicts into standard LangChain Document objects
-        documents: List[Document] = []
-        for chunk in chunks_list:
-            metadata: Dict[str, Any] = {
-                "chunk_id": chunk["chunk_id"],
-                "parent_id": chunk.get("parent_id"),
-                "page_index": chunk["page_index"],
-                "source_filename": payload.get("source_filename", "unknown"),
-                "document_id": document_id
-            }
-            doc = Document(page_content=chunk["text"], metadata=metadata)
-            documents.append(doc)
-
-        # 4. Tokenization preprocessing for case-insensitive BM25 search
-        def preprocess_text(text: str) -> List[str]:
-            return re.findall(r"\w+", text.lower())
-
-        # 5. Initialize BM25 retriever dynamically
-        try:
-            bm25_retriever = BM25Retriever.from_documents(
-                documents=documents,
-                preprocess_func=preprocess_text
-            )
+        if bm25_retriever is not None:
+            # Update dynamic k parameter
             bm25_retriever.k = top_k
-        except Exception as e:
-            raise VectorStoreError(
-                f"Failed to initialize BM25 retriever dynamically: {str(e)}") from e
+        else:
+            # 1. Resolve paths
+            chunks_file_path = self.chunks_dir / \
+                user_id / f"{document_id}.json"
+            if not chunks_file_path.exists():
+                raise VectorStoreError(
+                    f"Ingested chunks metadata file not found at {chunks_file_path}. Please upload the document first."
+                )
+
+            # 2. Load serialized JSON chunks
+            try:
+                with open(chunks_file_path, "r", encoding="utf-8") as f:
+                    payload = json.load(f)
+            except Exception as e:
+                raise VectorStoreError(
+                    f"Failed to read chunks metadata file: {str(e)}") from e
+
+            chunks_list = payload.get("chunks", [])
+            if not chunks_list:
+                raise VectorStoreError(
+                    "Metadata payload contains empty chunks list.")
+
+            # 3. Convert raw chunk dicts into standard LangChain Document objects
+            documents: List[Document] = []
+            for chunk in chunks_list:
+                metadata: Dict[str, Any] = {
+                    "chunk_id": chunk["chunk_id"],
+                    "parent_id": chunk.get("parent_id"),
+                    "page_index": chunk["page_index"],
+                    "source_filename": payload.get("source_filename", "unknown"),
+                    "document_id": document_id
+                }
+                doc = Document(page_content=chunk["text"], metadata=metadata)
+                documents.append(doc)
+
+            # 4. Tokenization preprocessing for case-insensitive BM25 search
+            def preprocess_text(text: str) -> List[str]:
+                return re.findall(r"\w+", text.lower())
+
+            # 5. Initialize BM25 retriever dynamically
+            try:
+                bm25_retriever = BM25Retriever.from_documents(
+                    documents=documents,
+                    preprocess_func=preprocess_text
+                )
+                bm25_retriever.k = top_k
+            except Exception as e:
+                raise VectorStoreError(
+                    f"Failed to initialize BM25 retriever dynamically: {str(e)}") from e
+
+            # Save in memory cache
+            with self._bm25_lock:
+                self._bm25_cache[key] = bm25_retriever
 
         # 6. Initialize vector retriever
         vector_retriever = self.get_retriever(

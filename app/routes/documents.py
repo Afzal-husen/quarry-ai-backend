@@ -13,6 +13,7 @@ from app.core.chunker import DocumentChunker
 from app.core.parsers import DocumentParser, DocumentParsingError
 from app.core.vectorstore import VectorStoreManager, VectorStoreError, ChromaConnectionCache
 from app.core.paths import get_data_dir
+from app.routes.upload import ingestion_jobs, jobs_lock
 
 router = APIRouter()
 
@@ -60,10 +61,8 @@ class DocumentSummaryRegenerateResponse(BaseModel):
 
 class ReindexResponse(BaseModel):
     """Pydantic model representing the response payload for document re-indexing."""
-    document_id: str = Field(..., description="The unique UUID of the re-indexed document.")
-    filename: str = Field(..., description="The original filename of the document.")
-    status: str = Field(..., description="Status of the re-indexing action.")
-    chunks_count: int = Field(..., description="The updated total count of text chunks.")
+    job_id: str = Field(..., description="The unique UUID of the background re-indexing job.")
+    status: str = Field(..., description="Status of the re-indexing job.")
 
 
 class PaginatedDocumentsResponse(BaseModel):
@@ -266,15 +265,138 @@ async def delete_document(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+def run_reindex_job(
+    document_id: str,
+    target_upload_file: Path,
+    original_filename: str,
+    user_id: str,
+    chunk_size: Optional[int],
+    chunk_overlap: Optional[int],
+    chunking_strategy: Optional[str] = "character",
+    semantic_threshold_type: Optional[str] = "percentile",
+    semantic_threshold: Optional[float] = None
+):
+    """Synchronously executes the parsing, chunking, and vector indexing in a background thread."""
+    from app.routes.upload import ingestion_jobs, jobs_lock
+
+    with jobs_lock:
+        if document_id in ingestion_jobs:
+            ingestion_jobs[document_id]["status"] = "processing"
+
+    try:
+        # Re-run full pipeline: Parse -> Chunk -> Embed/Index
+        documents = parser.parse_file(target_upload_file)
+        
+        split_docs = chunker.split_documents(
+            documents,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            chunking_strategy=chunking_strategy,
+            semantic_threshold_type=semantic_threshold_type,
+            semantic_threshold=semantic_threshold
+        )
+        
+        chunker.save_chunks(
+            document_id=document_id,
+            source_filename=original_filename,
+            chunks=split_docs,
+            output_dir=CHUNKS_DIR / user_id,
+            chunking_strategy=chunking_strategy
+        )
+
+        vector_manager.index_document(
+            user_id=user_id,
+            document_id=document_id,
+            source_filename=original_filename
+        )
+
+        # Regenerate document summary inline (failed summarization doesn't fail re-indexing)
+        chunks_file = CHUNKS_DIR / user_id / f"{document_id}.json"
+        try:
+            from app.core.summarizer import DocumentSummarizer
+            if chunks_file.exists():
+                with open(chunks_file, "r", encoding="utf-8") as f:
+                    payload = json.load(f)
+
+                parents = payload.get("parents", [])
+                if parents:
+                    parent_texts = [p.get("text", "") for p in parents if p.get("text")]
+                    combined_text = "\n\n".join(parent_texts)
+
+                    if len(combined_text) > 10000:
+                        truncated_parent_texts = parent_texts[:5]
+                        combined_text = "\n\n".join(truncated_parent_texts)
+
+                    summarizer = DocumentSummarizer()
+                    summary_text = summarizer.summarize_text(combined_text)
+
+                    payload["summary"] = summary_text
+                    payload["summary_status"] = "completed"
+                else:
+                    payload["summary"] = "No content available to summarize."
+                    payload["summary_status"] = "completed"
+
+                with open(chunks_file, "w", encoding="utf-8") as f:
+                    json.dump(payload, f, indent=4, ensure_ascii=False)
+        except Exception as summarization_err:
+            import logging
+            logging.getLogger("app.exception").error(
+                f"Failed to regenerate summary for document {document_id} during reindexing: {str(summarization_err)}"
+            )
+            try:
+                if chunks_file.exists():
+                    with open(chunks_file, "r", encoding="utf-8") as f:
+                        payload = json.load(f)
+                    payload["summary"] = ""
+                    payload["summary_status"] = "failed"
+                    with open(chunks_file, "w", encoding="utf-8") as f:
+                        json.dump(payload, f, indent=4, ensure_ascii=False)
+            except Exception:
+                pass
+
+        with jobs_lock:
+            if document_id in ingestion_jobs:
+                ingestion_jobs[document_id]["status"] = "complete"
+
+    except Exception as e:
+        import logging
+        logging.getLogger("app.exception").error(
+            f"Reindexing job failed for document '{document_id}': {str(e)}",
+            exc_info=True
+        )
+        # Perform hard cleanup on failure
+        chunks_file = CHUNKS_DIR / user_id / f"{document_id}.json"
+        if chunks_file.exists():
+            try:
+                chunks_file.unlink()
+            except Exception:
+                pass
+
+        vectorstore_path = vector_manager.vectorstore_dir / user_id / document_id
+        if vectorstore_path.exists():
+            try:
+                vector_manager.delete_document(
+                    user_id=user_id, document_id=document_id)
+            except Exception:
+                pass
+
+        with jobs_lock:
+            if document_id in ingestion_jobs:
+                ingestion_jobs[document_id]["status"] = "failed"
+                ingestion_jobs[document_id]["error"] = str(e)
+
+
 @router.post(
     "/{document_id}/reindex",
     response_model=ReindexResponse,
+    status_code=status.HTTP_202_ACCEPTED,
     summary="Reindex Document",
     description="Reuses the existing raw upload file on disk to re-run the parse, chunk, and index pipeline with optional chunk overrides.",
-    response_description="Returns metadata about the re-indexed document and total chunk count."
+    response_description="Returns the background ingestion job ID and status."
 )
 async def reindex_document(
     document_id: str,
+    background_tasks: BackgroundTasks,
     chunk_size: Optional[int] = Query(None, description="Character size of each split text block"),
     chunk_overlap: Optional[int] = Query(None, description="Character overlap between consecutive chunks"),
     chunking_strategy: Optional[str] = Query("character", description="Chunking strategy ('character' or 'semantic')"),
@@ -282,7 +404,7 @@ async def reindex_document(
     semantic_threshold: Optional[float] = Query(None, description="Custom similarity threshold value"),
     current_user: dict = Depends(get_current_user)
 ):
-    """Reuses the existing raw upload file on disk to re-run the parse -> chunk -> embed -> index pipeline."""
+    """Reuses the existing raw upload file on disk to re-run the parse -> chunk -> embed -> index pipeline in background."""
     # Validate strategy and threshold parameters
     if chunking_strategy not in ("character", "semantic"):
         raise HTTPException(
@@ -385,105 +507,36 @@ async def reindex_document(
                 detail=f"Failed to clear old vector index before reindexing: {str(e)}"
             )
 
-    # Re-run full pipeline: Parse -> Chunk -> Embed/Index
-    try:
-        documents = parser.parse_file(target_upload_file)
-    except DocumentParsingError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Unexpected parsing engine failure during reindexing: {str(e)}"
-        ) from e
+    # Initialize job status in registry
+    from datetime import datetime, timezone
+    with jobs_lock:
+        ingestion_jobs[document_id] = {
+            "status": "pending",
+            "document_id": document_id,
+            "filename": original_filename,
+            "user_id": user_id,
+            "created_at": datetime.now(timezone.utc),
+            "error": None
+        }
 
-    try:
-        split_docs = chunker.split_documents(
-            documents,
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
-            chunking_strategy=chunking_strategy,
-            semantic_threshold_type=semantic_threshold_type,
-            semantic_threshold=semantic_threshold
-        )
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"An error occurred during splitting: {str(e)}"
-        ) from e
-
-    try:
-        chunker.save_chunks(
-            document_id=document_id,
-            source_filename=original_filename,
-            chunks=split_docs,
-            output_dir=CHUNKS_DIR / user_id,
-            chunking_strategy=chunking_strategy
-        )
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to persist chunked metadata: {str(e)}"
-        ) from e
-
-    try:
-        vector_manager.index_document(
-            user_id=user_id,
-            document_id=document_id,
-            source_filename=original_filename
-        )
-    except VectorStoreError as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Document reindexed on disk but vector indexing failed: {str(e)}"
-        ) from e
-
-    # Regenerate document summary inline (failed summarization doesn't fail re-indexing)
-    try:
-        from app.core.summarizer import DocumentSummarizer
-        if chunks_file.exists():
-            with open(chunks_file, "r", encoding="utf-8") as f:
-                payload = json.load(f)
-
-            parents = payload.get("parents", [])
-            if parents:
-                parent_texts = [p.get("text", "") for p in parents if p.get("text")]
-                combined_text = "\n\n".join(parent_texts)
-
-                if len(combined_text) > 10000:
-                    truncated_parent_texts = parent_texts[:5]
-                    combined_text = "\n\n".join(truncated_parent_texts)
-
-                summarizer = DocumentSummarizer()
-                summary_text = summarizer.summarize_text(combined_text)
-
-                payload["summary"] = summary_text
-                payload["summary_status"] = "completed"
-            else:
-                payload["summary"] = "No content available to summarize."
-                payload["summary_status"] = "completed"
-
-            with open(chunks_file, "w", encoding="utf-8") as f:
-                json.dump(payload, f, indent=4, ensure_ascii=False)
-    except Exception as summarization_err:
-        import logging
-        logging.error(f"Failed to regenerate summary for document {document_id} during reindexing: {str(summarization_err)}")
-        try:
-            if chunks_file.exists():
-                with open(chunks_file, "r", encoding="utf-8") as f:
-                    payload = json.load(f)
-                payload["summary"] = ""
-                payload["summary_status"] = "failed"
-                with open(chunks_file, "w", encoding="utf-8") as f:
-                    json.dump(payload, f, indent=4, ensure_ascii=False)
-        except Exception:
-            pass
-
-    return ReindexResponse(
+    # Dispatch to background task execution
+    background_tasks.add_task(
+        run_reindex_job,
         document_id=document_id,
-        filename=original_filename,
-        status="success",
-        chunks_count=len(split_docs)
+        target_upload_file=target_upload_file,
+        original_filename=original_filename,
+        user_id=user_id,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        chunking_strategy=chunking_strategy,
+        semantic_threshold_type=semantic_threshold_type,
+        semantic_threshold=semantic_threshold
     )
+
+    return {
+        "job_id": document_id,
+        "status": "pending"
+    }
 
 
 @router.get(

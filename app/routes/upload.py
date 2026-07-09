@@ -160,6 +160,11 @@ def run_ingestion_job(
                 ingestion_jobs[document_id]["status"] = "complete"
 
     except Exception as e:
+        import logging
+        logging.getLogger("app.exception").error(
+            f"Ingestion job failed for document '{document_id}': {str(e)}",
+            exc_info=True
+        )
         # Perform hard cleanup on failure
         if temp_file_path.exists():
             try:

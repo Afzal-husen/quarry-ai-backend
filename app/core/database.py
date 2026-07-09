@@ -28,6 +28,15 @@ class UserDatabaseManager:
                 );
             """)
             cursor.execute("""
+                CREATE TABLE IF NOT EXISTS refresh_tokens (
+                    token TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    expires_at TIMESTAMP NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+                );
+            """)
+            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS chat_sessions (
                     id TEXT PRIMARY KEY,
                     user_id TEXT NOT NULL,
@@ -53,9 +62,11 @@ class UserDatabaseManager:
 
     @classmethod
     def get_connection(cls) -> sqlite3.Connection:
-        """Returns a standard SQLite connection with foreign keys enabled."""
-        conn = sqlite3.connect(str(DB_PATH))
+        """Returns a standard SQLite connection with foreign keys and WAL enabled."""
+        conn = sqlite3.connect(str(DB_PATH), timeout=5.0)
         conn.execute("PRAGMA foreign_keys = ON;")
+        conn.execute("PRAGMA journal_mode = WAL;")
+        conn.execute("PRAGMA busy_timeout = 5000;")
         return conn
 
     @classmethod
@@ -73,27 +84,41 @@ class UserDatabaseManager:
         cursor = conn.cursor()
         try:
             cursor.execute(
-                "SELECT id, username, hashed_password, created_at FROM users WHERE username = ?;",
+                "SELECT id, username, hashed_password FROM users WHERE username = ?;",
                 (username,)
             )
             row = cursor.fetchone()
-            if row:
-                return dict(row)
-            return None
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    @classmethod
+    def get_user_by_id(cls, user_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieves a user record by user_id."""
+        conn = cls.get_connection()
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                "SELECT id, username, hashed_password FROM users WHERE id = ?;",
+                (user_id,)
+            )
+            row = cursor.fetchone()
+            return dict(row) if row else None
         finally:
             conn.close()
 
     @classmethod
     def create_user(cls, user_id: str, username: str, hashed_password: str) -> Dict[str, Any]:
-        """Creates a new user record.
+        """Registers a new user inside the SQLite database.
 
         Args:
-            user_id: Unique UUID string for the user.
-            username: Unique username.
-            hashed_password: Hashed password string.
+            user_id: Unique UUID to assign to the new user.
+            username: Display username (must be unique).
+            hashed_password: Hashed password using bcrypt.
 
         Returns:
-            The created user dictionary.
+            A dictionary representing the created user database record.
 
         Raises:
             ValueError: If the username already exists.
@@ -116,6 +141,50 @@ class UserDatabaseManager:
                 raise ValueError(
                     f"Username '{username}' already exists.") from e
             raise e
+        finally:
+            conn.close()
+
+    @classmethod
+    def create_refresh_token(cls, token: str, user_id: str, expires_at: str) -> None:
+        """Stores a cryptographically secure refresh token linked to a user."""
+        conn = cls.get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                "INSERT INTO refresh_tokens (token, user_id, expires_at) VALUES (?, ?, ?);",
+                (token, user_id, expires_at)
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    @classmethod
+    def get_refresh_token(cls, token: str) -> Optional[Dict[str, Any]]:
+        """Retrieves a refresh token record."""
+        conn = cls.get_connection()
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                "SELECT token, user_id, expires_at, created_at FROM refresh_tokens WHERE token = ?;",
+                (token,)
+            )
+            row = cursor.fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    @classmethod
+    def delete_refresh_token(cls, token: str) -> None:
+        """Deletes/revokes a refresh token from the database."""
+        conn = cls.get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                "DELETE FROM refresh_tokens WHERE token = ?;",
+                (token,)
+            )
+            conn.commit()
         finally:
             conn.close()
 

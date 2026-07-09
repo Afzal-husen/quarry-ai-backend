@@ -158,9 +158,22 @@ def test_document_lifecycle_flow(auth_headers, other_auth_headers):
 
     # 6. Reindex document as user-123
     reindex_res = client.post(f"/documents/{doc_id}/reindex?chunk_size=10&chunk_overlap=2", headers=auth_headers)
-    assert reindex_res.status_code == 200
-    assert reindex_res.json()["status"] == "success"
-    assert reindex_res.json()["document_id"] == doc_id
+    assert reindex_res.status_code == 202
+    job_id = reindex_res.json()["job_id"]
+    assert job_id == doc_id
+
+    # Poll status endpoint until background re-indexing finishes
+    status = "pending"
+    for _ in range(50):
+        status_res = client.get(f"/upload/{job_id}/status", headers=auth_headers)
+        assert status_res.status_code == 200
+        status_data = status_res.json()
+        status = status_data["status"]
+        if status in ["complete", "failed"]:
+            break
+        time.sleep(0.1)
+
+    assert status == "complete"
 
     # Check that chunks file was updated
     with open(chunks_path, "r", encoding="utf-8") as f:
