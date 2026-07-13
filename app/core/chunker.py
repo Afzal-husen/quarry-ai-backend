@@ -185,6 +185,11 @@ class DocumentChunker:
                     )
                     child_docs.append(child_doc)
 
+            # Explicitly delete references and collect garbage to reduce peak ingestion spikes
+            del parent_chunks
+            import gc
+            gc.collect()
+
         return child_docs
 
     def save_chunks(

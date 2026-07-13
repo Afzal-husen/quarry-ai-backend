@@ -184,3 +184,12 @@ def test_upload_chunking_parameter_overrides(auth_headers):
         assert metadata["total_chunks"] > 1
         for chunk in metadata["chunks"]:
             assert chunk["char_length"] <= 5
+
+
+def test_upload_file_size_limit_env(auth_headers, monkeypatch):
+    """Verify that file uploads exceeding MAX_UPLOAD_SIZE_MB are rejected with 400."""
+    monkeypatch.setenv("MAX_UPLOAD_SIZE_MB", "0")  # Set limit to 0 MB to force reject
+    files = {"file": ("test_limit.pdf", b"%PDF-1.4 minimal content", "application/pdf")}
+    response = client.post("/upload", files=files, headers=auth_headers)
+    assert response.status_code == 400
+    assert "exceeds the limit of 0 MB" in response.json()["detail"]

@@ -87,21 +87,27 @@ def retrieve_and_rerank_context(
     sorted_rrf = sorted(rrf_scores.values(), key=lambda x: x[1], reverse=True)
     deduped_chunks = [item[0] for item in sorted_rrf]
 
-    # 4. Rerank top RRF candidates using FlashRank down to top_k
+    # 4. Rerank top RRF candidates using FlashRank down to top_k if enabled
     if not deduped_chunks:
         return [], retrieval_ms, 0.0
 
-    try:
-        ranker = RerankManager.get_ranker()
-        compressor = FlashrankRerank(client=ranker, top_n=top_k)
-        matching_chunks = compressor.compress_documents(
-            deduped_chunks[:candidate_k], rewritten_question)
-    except RerankerError as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Reranking failed: {str(e)}"
-        )
-    reranking_ms = (time.perf_counter() - start_rerank) * 1000
+    enable_rerank = os.getenv("ENABLE_RERANKING", "true").lower() == "true"
+    if not enable_rerank:
+        # Bypass cross-encoder reranking entirely and return RRF chunks
+        matching_chunks = deduped_chunks[:top_k]
+        reranking_ms = 0.0
+    else:
+        try:
+            ranker = RerankManager.get_ranker()
+            compressor = FlashrankRerank(client=ranker, top_n=top_k)
+            matching_chunks = compressor.compress_documents(
+                deduped_chunks[:candidate_k], rewritten_question)
+        except RerankerError as e:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Reranking failed: {str(e)}"
+            )
+        reranking_ms = (time.perf_counter() - start_rerank) * 1000
 
     # Resolve parent documents from child chunks if Parent-Document Retriever is active
     matching_chunks = vector_manager.resolve_parent_documents(

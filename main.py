@@ -51,7 +51,10 @@ _DATA_DIR = get_data_dir()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifespan: startup and shutdown hooks."""
-    # Startup: nothing additional needed beyond module-level initialization
+    # Startup: log info warning if reranking is disabled to save RAM
+    enable_rerank = os.getenv("ENABLE_RERANKING", "true").lower() == "true"
+    if not enable_rerank:
+        logging.info("FlashRank reranking is disabled via environment variable.")
     yield
     # Shutdown: cleanly close all open cached Chroma client connections
     ChromaConnectionCache.clear()

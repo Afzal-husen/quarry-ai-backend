@@ -44,3 +44,39 @@ def test_compression_retriever():
     assert "Paris" in compressed_docs[0].page_content
     # Eiffel Tower document is also very relevant to Paris, so it should rank highly
     assert any("Eiffel Tower" in d.page_content for d in compressed_docs)
+
+
+def test_optional_reranking_bypass(monkeypatch):
+    """Verify that if ENABLE_RERANKING is false, retrieve_and_rerank_context bypasses the rerank model."""
+    from app.routes.query import retrieve_and_rerank_context
+    
+    # Configure mock environment variable
+    monkeypatch.setenv("ENABLE_RERANKING", "false")
+    
+    with patch("app.routes.query.vector_manager") as mock_vector_manager, \
+         patch("app.core.reranker.RerankManager.get_ranker") as mock_get_ranker:
+         
+        # Setup mock hybrid retriever
+        mock_retri = MagicMock()
+        mock_retri.invoke.return_value = [
+            Document(page_content="Chunk A", metadata={"chunk_id": "1"}),
+            Document(page_content="Chunk B", metadata={"chunk_id": "2"}),
+        ]
+        mock_vector_manager.get_hybrid_retriever.return_value = mock_retri
+        mock_vector_manager.resolve_parent_documents.side_effect = lambda user_id, documents: documents
+        
+        chunks, ret_ms, rer_ms = retrieve_and_rerank_context(
+            user_id="test-user",
+            target_ids=["doc-1"],
+            rewritten_question="test question",
+            top_k=2
+        )
+        
+        # Verify that reranking time is 0.0
+        assert rer_ms == 0.0
+        # Verify chunks are returned directly
+        assert len(chunks) == 2
+        assert chunks[0].page_content == "Chunk A"
+        # Verify that RerankManager.get_ranker was NEVER called
+        mock_get_ranker.assert_not_called()
+
