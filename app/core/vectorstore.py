@@ -269,12 +269,21 @@ class VectorStoreManager:
         # 4. Initialize isolated Chroma vector index and persist embeddings on disk
         try:
             embeddings = EmbeddingsManager.get_embeddings()
-            # Chroma handles automatic SQLite serialization upon instantiation
-            vectorstore = Chroma.from_documents(
-                documents=documents,
-                embedding=embeddings,
-                persist_directory=str(db_path)
+            # Initialize empty Chroma DB instance first
+            vectorstore = Chroma(
+                persist_directory=str(db_path),
+                embedding_function=embeddings
             )
+            
+            # Index in batches of 100 documents to limit peak memory spikes during embedding computation
+            BATCH_SIZE = 100
+            for i in range(0, len(documents), BATCH_SIZE):
+                batch = documents[i:i + BATCH_SIZE]
+                vectorstore.add_documents(documents=batch)
+                
+                # Explicitly collect garbage after each batch is processed to free memory
+                import gc
+                gc.collect()
             # Explicitly close the database client to release on-disk file descriptors (critical for Windows)
             client = getattr(vectorstore, "_client", None)
             if client:
