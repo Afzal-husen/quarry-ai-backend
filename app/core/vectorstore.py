@@ -11,8 +11,8 @@ from app.core.paths import get_data_dir
 
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
-from langchain_core.vectorstores import VectorStoreRetriever
-from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_core.embeddings import Embeddings
+from fastembed import TextEmbedding
 from langchain_community.retrievers import BM25Retriever
 from langchain_classic.retrievers import EnsembleRetriever
 
@@ -27,21 +27,51 @@ class VectorStoreError(Exception):
     pass
 
 
-class EmbeddingsManager:
-    """Thread-safe singleton class to load and cache local Hugging Face embeddings."""
+class FastEmbedLangChainWrapper(Embeddings):
+    """Wrapper class for FastEmbed to conform to LangChain's Embeddings interface."""
 
-    _instance: Optional[HuggingFaceEmbeddings] = None
+    def __init__(self, model_name: str, cache_dir: str, threads: int):
+        self.model_name = model_name
+        self.cache_dir = cache_dir
+        self.threads = threads
+        try:
+            self.client = TextEmbedding(
+                model_name=model_name,
+                cache_dir=cache_dir,
+                threads=threads
+            )
+        except Exception as e:
+            raise EmbeddingsError(f"Failed to initialize FastEmbed model '{model_name}': {str(e)}") from e
+
+    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        try:
+            return [list(map(float, vec)) for vec in self.client.embed(texts)]
+        except Exception as e:
+            raise EmbeddingsError(f"Failed to embed documents with FastEmbed: {str(e)}") from e
+
+    def embed_query(self, text: str) -> List[float]:
+        try:
+            vec = next(self.client.query_embed(text))
+            return list(map(float, vec))
+        except Exception as e:
+            raise EmbeddingsError(f"Failed to embed query with FastEmbed: {str(e)}") from e
+
+
+class EmbeddingsManager:
+    """Thread-safe singleton class to load and cache local FastEmbed embeddings."""
+
+    _instance: Optional[Embeddings] = None
     _lock = threading.Lock()
 
     @classmethod
-    def get_embeddings(cls) -> HuggingFaceEmbeddings:
-        """Loads and caches the Hugging Face embedding model singleton.
+    def get_embeddings(cls) -> Embeddings:
+        """Loads and caches the FastEmbed embedding model singleton.
 
-        This ensures that the model is only loaded into CPU/GPU memory once
+        This ensures that the model is only loaded into CPU memory once
         and shared across all concurrent route threads.
 
         Returns:
-            The instantiated HuggingFaceEmbeddings object.
+            The instantiated Embeddings object.
 
         Raises:
             EmbeddingsError: If the model fails to load successfully.
@@ -49,19 +79,38 @@ class EmbeddingsManager:
         if cls._instance is None:
             with cls._lock:
                 if cls._instance is None:
-                    # Retrieve the embedding model from environment, defaulting to standard MiniLM
-                    model_name = os.getenv(
+                    # Retrieve the embedding model from environment
+                    model_env = os.getenv(
                         "EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+                    
+                    # Custom Mapping Dictionary mapping HF IDs to FastEmbed equivalents
+                    MODEL_MAP = {
+                        "sentence-transformers/all-MiniLM-L6-v2": "sentence-transformers/all-MiniLM-L6-v2",
+                        "all-MiniLM-L6-v2": "sentence-transformers/all-MiniLM-L6-v2",
+                        "BAAI/bge-small-en-v1.5": "BAAI/bge-small-en-v1.5",
+                        "bge-small-en-v1.5": "BAAI/bge-small-en-v1.5"
+                    }
+                    model_name = MODEL_MAP.get(model_env, model_env)
+                    
+                    # Local cache directory path
+                    BASE_DIR = Path(__file__).resolve().parent.parent.parent
+                    cache_dir = os.getenv("FASTEMBED_CACHE_DIR", str(BASE_DIR / "data" / "models" / "fastembed"))
+                    
+                    # Thread configuration for resource containment on cloud containers
                     try:
-                        # Load offline-safe Hugging Face embeddings via LangChain
-                        cls._instance = HuggingFaceEmbeddings(
+                        threads = int(os.getenv("FASTEMBED_THREADS", "1"))
+                    except ValueError:
+                        threads = 1
+                        
+                    try:
+                        cls._instance = FastEmbedLangChainWrapper(
                             model_name=model_name,
-                            # Suppress excessive logging during model initialization
-                            model_kwargs={"device": "cpu"}
+                            cache_dir=cache_dir,
+                            threads=threads
                         )
                     except Exception as e:
                         raise EmbeddingsError(
-                            f"Failed to initialize Hugging Face embedding model '{model_name}': {str(e)}"
+                            f"Failed to initialize FastEmbed embedding model '{model_name}': {str(e)}"
                         ) from e
         return cls._instance
 
