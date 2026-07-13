@@ -25,8 +25,7 @@ COPY requirements.txt ./
 # Install dependencies using uv into the system python environment
 # --mount=type=cache persists uv's wheel cache on the Docker host between builds
 # so unchanged packages are never re-downloaded.
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -r requirements.txt
+RUN uv pip install --system -r requirements.txt
 
 # Pre-download and bake FastEmbed and FlashRank model weights during image building
 RUN python -c "from fastembed import TextEmbedding; TextEmbedding(model_name='sentence-transformers/all-MiniLM-L6-v2', cache_dir='/app/models/fastembed'); TextEmbedding(model_name='BAAI/bge-small-en-v1.5', cache_dir='/app/models/fastembed')"
