@@ -185,10 +185,13 @@ class DocumentChunker:
                     )
                     child_docs.append(child_doc)
 
-            # Explicitly delete references and collect garbage to reduce peak ingestion spikes
+            # Explicitly delete references to reduce peak ingestion spikes
             del parent_chunks
-            import gc
-            gc.collect()
+
+        # Collect garbage once at the end of document splitting to reclaim memory
+        # without causing multiple blocking per-page CPU/GIL freezes
+        import gc
+        gc.collect()
 
         return child_docs
 

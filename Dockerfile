@@ -6,7 +6,10 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     DATA_DIR=/app/data \
     FASTEMBED_CACHE_DIR=/app/models/fastembed \
-    FLASHRANK_CACHE_DIR=/app/models/flashrank
+    FLASHRANK_CACHE_DIR=/app/models/flashrank \
+    OMP_NUM_THREADS=1 \
+    MKL_NUM_THREADS=1 \
+    OPENBLAS_NUM_THREADS=1
 
 WORKDIR /app
 
