@@ -201,7 +201,7 @@ def run_ingestion_job(
     description="Uploads a PDF, DOC, or DOCX document and dispatches the parsing and vector indexing to the background.",
     response_description="Returns the background ingestion job ID and status."
 )
-@limiter.limit(os.getenv("RATE_LIMIT_UPLOAD", "30/minute"))
+@limiter.limit(os.getenv("RATE_LIMIT_UPLOAD", "5/minute"))
 async def upload_file(
     request: Request,
     background_tasks: BackgroundTasks,
