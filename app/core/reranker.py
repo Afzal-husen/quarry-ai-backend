@@ -40,9 +40,10 @@ class RerankManager:
                         ) from e
 
                     model_name = os.getenv("RERANK_MODEL", "ms-marco-MiniLM-L-12-v2")
+                    cache_dir = os.getenv("FLASHRANK_CACHE_DIR", "/app/models/flashrank")
                     try:
                         # Ranker will download the model automatically on first run and cache it
-                        cls._instance = Ranker(model_name=model_name)
+                        cls._instance = Ranker(model_name=model_name, cache_dir=cache_dir)
                     except Exception as e:
                         raise RerankerError(
                             f"Failed to initialize FlashRank Ranker with model '{model_name}': {str(e)}"
