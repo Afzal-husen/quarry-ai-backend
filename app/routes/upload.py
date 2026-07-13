@@ -237,9 +237,9 @@ async def upload_file(
     
     file_size = file.size
     if file_size is None:
-        await file.seek(0, 2)
-        file_size = await file.tell()
-        await file.seek(0)
+        file.file.seek(0, 2)
+        file_size = file.file.tell()
+        file.file.seek(0)
         
     if file_size > max_size_bytes:
         raise HTTPException(

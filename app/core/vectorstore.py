@@ -11,6 +11,7 @@ from app.core.paths import get_data_dir
 
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
+from langchain_core.vectorstores import VectorStoreRetriever
 from langchain_core.embeddings import Embeddings
 from fastembed import TextEmbedding
 from langchain_community.retrievers import BM25Retriever
@@ -51,7 +52,7 @@ class FastEmbedLangChainWrapper(Embeddings):
 
     def embed_query(self, text: str) -> List[float]:
         try:
-            vec = next(self.client.query_embed(text))
+            vec = next(iter(self.client.query_embed(text)))
             return list(map(float, vec))
         except Exception as e:
             raise EmbeddingsError(f"Failed to embed query with FastEmbed: {str(e)}") from e

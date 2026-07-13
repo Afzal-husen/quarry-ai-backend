@@ -488,7 +488,6 @@ async def query_document_stream(
             yield f"data: {json.dumps({'error': str(e)})}\n\n"
             return
         except Exception as e:
-            import logging
             logging.getLogger("app.exception").error(
                 f"Unhandled exception during streaming generation: {str(e)}",
                 exc_info=True
