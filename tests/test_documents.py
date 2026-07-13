@@ -443,3 +443,124 @@ def test_regenerate_document_summary_success(auth_headers):
                 chunks_path.unlink()
 
 
+def test_guided_summary_endpoint_validation(auth_headers):
+    """Verify endpoint rejects empty or too long focus topics with 400, and invalid UUID with 422."""
+    doc_id = "not-a-uuid"
+    res = client.post(
+        f"/documents/{doc_id}/summary/guided",
+        json={"focus_topic": "Valid Topic"},
+        headers=auth_headers
+    )
+    assert res.status_code == 422
+
+    doc_id = "00000000-0000-0000-0000-000000000000"
+    res = client.post(
+        f"/documents/{doc_id}/summary/guided",
+        json={"focus_topic": ""},
+        headers=auth_headers
+    )
+    assert res.status_code == 400
+    assert "cannot be empty" in res.json()["detail"]
+
+    res = client.post(
+        f"/documents/{doc_id}/summary/guided",
+        json={"focus_topic": "x" * 201},
+        headers=auth_headers
+    )
+    assert res.status_code == 400
+    assert "must not exceed 200 characters" in res.json()["detail"]
+
+
+def test_guided_summary_endpoint_unauthorized():
+    """Verify endpoint rejects requests without credentials with 401."""
+    doc_id = "00000000-0000-0000-0000-000000000000"
+    res = client.post(
+        f"/documents/{doc_id}/summary/guided",
+        json={"focus_topic": "Valid topic"}
+    )
+    assert res.status_code == 401
+
+
+def test_guided_summary_endpoint_not_found(auth_headers):
+    """Verify endpoint returns 404 for missing documents."""
+    doc_id = "00000000-0000-0000-0000-000000000000"
+    res = client.post(
+        f"/documents/{doc_id}/summary/guided",
+        json={"focus_topic": "Valid topic"},
+        headers=auth_headers
+    )
+    assert res.status_code == 404
+    assert "Document not found" in res.json()["detail"]
+
+
+def test_guided_summary_endpoint_success(auth_headers):
+    """Verify endpoint returns 200 with focused summary on successful keyword match."""
+    doc_id = "11111111-2222-3333-4444-555555555555"
+    user_chunks_dir = CHUNKS_DIR / "user-123"
+    user_chunks_dir.mkdir(parents=True, exist_ok=True)
+    chunks_path = user_chunks_dir / f"{doc_id}.json"
+
+    # Setup mock chunks containing target keyword
+    mock_payload = {
+        "summary": "Original generic summary",
+        "summary_status": "completed",
+        "parents": [
+            {"text": "This paragraph discusses specific revenue metrics and financial details."},
+            {"text": "This second paragraph has general filler content about system layout."}
+        ]
+    }
+    with open(chunks_path, "w", encoding="utf-8") as f:
+        json.dump(mock_payload, f)
+
+    try:
+        with patch("app.core.summarizer.DocumentSummarizer.summarize_with_focus") as mock_summarize:
+            mock_summarize.return_value = "Focused summary output text"
+            
+            res = client.post(
+                f"/documents/{doc_id}/summary/guided",
+                json={"focus_topic": "metrics"},
+                headers=auth_headers
+            )
+            assert res.status_code == 200
+            assert res.json()["guided_summary"] == "Focused summary output text"
+            # Verify only the first chunk containing 'metrics' was sent to the summarizer
+            mock_summarize.assert_called_once_with(
+                "This paragraph discusses specific revenue metrics and financial details.",
+                "metrics"
+            )
+    finally:
+        if chunks_path.exists():
+            chunks_path.unlink()
+
+
+def test_guided_summary_endpoint_no_matches(auth_headers):
+    """Verify endpoint returns soft fallback 200 if keyword matches no chunks."""
+    doc_id = "11111111-2222-3333-4444-555555555555"
+    user_chunks_dir = CHUNKS_DIR / "user-123"
+    user_chunks_dir.mkdir(parents=True, exist_ok=True)
+    chunks_path = user_chunks_dir / f"{doc_id}.json"
+
+    mock_payload = {
+        "summary": "Original generic summary",
+        "summary_status": "completed",
+        "parents": [
+            {"text": "This paragraph has general filler content about system layout."}
+        ]
+    }
+    with open(chunks_path, "w", encoding="utf-8") as f:
+        json.dump(mock_payload, f)
+
+    try:
+        res = client.post(
+            f"/documents/{doc_id}/summary/guided",
+            json={"focus_topic": "revenue"},
+            headers=auth_headers
+        )
+        assert res.status_code == 200
+        assert res.json()["guided_summary"] == 'No content found related to "revenue".'
+    finally:
+        if chunks_path.exists():
+            chunks_path.unlink()
+
+
+

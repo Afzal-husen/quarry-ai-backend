@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import uuid
@@ -57,6 +58,16 @@ class DocumentSummaryRegenerateResponse(BaseModel):
     """Pydantic model representing the response for triggering summarization regeneration."""
     document_id: str = Field(..., description="The unique UUID of the document.")
     status: str = Field(..., description="Status of the request (should be 'pending').")
+
+
+class GuidedSummaryRequest(BaseModel):
+    """Pydantic model representing the request for a guided document summary."""
+    focus_topic: str = Field(..., description="The topic to focus the summary on.")
+
+
+class GuidedSummaryResponse(BaseModel):
+    """Pydantic model representing the response for a guided document summary."""
+    guided_summary: str = Field(..., description="The generated focused summary.")
 
 
 class ReindexResponse(BaseModel):
@@ -829,4 +840,96 @@ async def regenerate_document_summary(
         document_id=document_id,
         status="pending"
     )
+
+
+@router.post(
+    "/{document_id}/summary/guided",
+    response_model=GuidedSummaryResponse,
+    summary="Get Guided Document Summary",
+    description="Generates an inline markdown-formatted summary of the document, scoped strictly to the provided focus topic.",
+    response_description="A JSON object containing the guided summary details."
+)
+async def get_guided_document_summary(
+    document_id: str,
+    request: GuidedSummaryRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """Generates an inline markdown summary focused on a specific topic."""
+    try:
+        uuid.UUID(document_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=422,
+            detail="document_id must be a valid UUID string."
+        )
+
+    topic = request.focus_topic.strip()
+    if not topic:
+        raise HTTPException(
+            status_code=400,
+            detail="focus_topic cannot be empty."
+        )
+    if len(topic) > 200:
+        raise HTTPException(
+            status_code=400,
+            detail="focus_topic must not exceed 200 characters."
+        )
+
+    user_id = current_user["id"]
+    chunks_file = CHUNKS_DIR / user_id / f"{document_id}.json"
+
+    if not chunks_file.exists():
+        raise HTTPException(
+            status_code=404,
+            detail="Document not found or chunks metadata file missing."
+        )
+
+    try:
+        with open(chunks_file, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to read document chunks metadata: {str(e)}"
+        )
+
+    parents = payload.get("parents", [])
+    topic_lower = topic.lower()
+    matched_parents = [p for p in parents if p.get("text") and topic_lower in p["text"].lower()]
+
+    if not matched_parents:
+        return GuidedSummaryResponse(
+            guided_summary=f'No content found related to "{topic}".'
+        )
+
+    parent_texts = [p.get("text", "") for p in matched_parents if p.get("text")]
+    combined_text = "\n\n".join(parent_texts)
+
+    if len(combined_text) > 10000:
+        truncated_parent_texts = parent_texts[:5]
+        combined_text = "\n\n".join(truncated_parent_texts)
+
+    from app.core.summarizer import DocumentSummarizer, SummarizationError
+    try:
+        summarizer = DocumentSummarizer()
+        summary_text = await asyncio.to_thread(
+            summarizer.summarize_with_focus,
+            combined_text,
+            topic
+        )
+    except SummarizationError as e:
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate guided summary: {str(e)}"
+        )
+
+    return GuidedSummaryResponse(
+        guided_summary=summary_text
+    )
+
 

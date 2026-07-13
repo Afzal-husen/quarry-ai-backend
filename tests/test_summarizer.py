@@ -55,3 +55,22 @@ def test_summarizer_inference_failure():
             summarizer.summarize_text("Some text.")
         
         assert "Summarization inference failed" in str(exc_info.value)
+
+def test_summarizer_with_focus_success():
+    """Verify that summarize_with_focus correctly invokes the model and returns the summary."""
+    from langchain_core.messages import AIMessage
+    with patch("app.core.qa.GroqConnectionManager.get_chat_model") as mock_get_model:
+        mock_model = MagicMock()
+        mock_response = AIMessage(content="TL;DR: Scoped topic summary.\n\n### Key Takeaways\n- Bullet 1")
+        mock_model.return_value = mock_response
+        mock_model.invoke.return_value = mock_response
+        mock_get_model.return_value = mock_model
+
+        summarizer = DocumentSummarizer()
+        result = summarizer.summarize_with_focus("This is the document content.", "topicX")
+        
+        assert "TL;DR" in result
+        assert "Key Takeaways" in result
+        assert "Scoped topic summary" in result
+        assert mock_model.invoke.called or mock_model.called
+
